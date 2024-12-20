@@ -1,7 +1,8 @@
 import fs from 'fs';
 import { parse as parseYaml } from 'yaml';
 import IPCIDR from 'ip-cidr';
-import { AxiosProxyConfig } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { URL } from 'url'; // Import the 'URL' class
 
 // Set the working dir based on the --baseDir argument
 const baseDir = process.argv.find(arg=>arg.startsWith('--baseDir=') && arg.length > 10)?.substring(10);
@@ -100,7 +101,7 @@ export class Config
             else if(!isStringValue(this.clientTenant))
                 throw new InvalidConfig('Missing "appReg.tenant" property');
         }
-        
+
         if(this.sendRetryInterval !== undefined && this.sendRetryInterval < 1)
             throw new InvalidConfig('"retryInterval" may not be smaller than 1');
         else if(this.smtpRequireAuth && !this.smtpUsers?.length)
@@ -319,19 +320,15 @@ export class Config
         return this.#config.httpProxy?.username;
     }
 
-    static get httpProxyConfig(): AxiosProxyConfig | undefined
+    static get httpProxyConfig(): HttpsProxyAgent<string> | undefined
     {
-        if(this.httpProxyHost && this.httpProxyPort)
-        {
-            return {
-                host: Config.httpProxyHost!,
-                port: Config.httpProxyPort!,
-                protocol: Config.httpProxyProtocol,
-                auth: (Config.httpProxyUsername && Config.httpProxyPassword)?{
-                    username: Config.httpProxyUsername,
-                    password: Config.httpProxyPassword,
-                }:undefined,
-            };
+        if (this.httpProxyHost && this.httpProxyPort) {
+            const proxyOpts = new URL(`${this.httpProxyProtocol}://${this.httpProxyHost}:${this.httpProxyPort}`);
+            if (this.httpProxyUsername && this.httpProxyPassword) {
+                proxyOpts.username = this.httpProxyUsername;
+                proxyOpts.password = this.httpProxyPassword;
+            }
+            return new HttpsProxyAgent(proxyOpts);
         }
     }
 
@@ -405,7 +402,7 @@ export class Config
     {
         key = key.toLowerCase();
         const arg = process.argv.find(f=>f.toLowerCase().startsWith(`--${key}`));
-        
+
         const value: string|undefined = arg?.split('=')[1];
         if(value === undefined) return undefined;
 

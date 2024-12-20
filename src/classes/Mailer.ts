@@ -1,13 +1,16 @@
 import fs from 'fs';
 import readline from 'readline';
 import { Mutex, Semaphore } from 'async-mutex';
-import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, isAxiosError } from 'axios';
 import { Base64Encode } from 'base64-stream';
 import addressparser from 'nodemailer/lib/addressparser';
 import { ConfidentialClientApplication } from '@azure/msal-node';
 import { Config } from './Config';
 import { UnrecoverableError } from './Constants';
 import { MsalProxy } from './MsalProxy';
+import fetch, { RequestInit, Response } from 'node-fetch';
+import { prefixedLog } from './Logger';
+
+const log = prefixedLog('Mailer');
 
 export class MailboxAccessDenied extends UnrecoverableError { }
 export class InvalidMailContent extends UnrecoverableError { }
@@ -53,19 +56,18 @@ export class Mailer
                 await this.#retryableRequest({
                     method: 'post',
                     url: `https://graph.microsoft.com/v1.0/users/${sender}/sendMail`,
-                    data: readStream.pipe(new Base64Encode()),
+                    body: readStream.pipe(new Base64Encode()),
                     headers: {
                         Authorization: `Bearer ${token}`,
                         'Content-Type': 'text/plain',
                         'User-Agent': `SMPT2Graph/${VERSION}`,
                     },
-                    timeout: 10000,
-                    proxy: Config.httpProxyConfig,
+                    agent: Config.httpProxyConfig,
                 });
             } catch(error: any) {
-                if('response' in error && (error as AxiosError).response?.data)
+                if('response' in error && (error).response?.body)
                 {
-                    const data = (error as AxiosError).response?.data as any;
+                    const data = (error).response?.body as any;
                     if('error' in data && 'code' in data.error)
                     {
                         if(data.error.code === 'ErrorAccessDenied')
@@ -87,23 +89,26 @@ export class Mailer
     }
 
     /** Automatically retry a request when it's being throttled by the Graph API */
-    static async #retryableRequest<RequestData = any, ReponseData = any>(request: AxiosRequestConfig<RequestData>): Promise<AxiosResponse<RequestData, ReponseData>>
+    static async #retryableRequest<RequestData = any, ResponseData = any>(request: RequestInit & { url: string, data?: RequestData }): Promise<Response>
     {
         const retryLimit = 3;
         let retryCount = 0;
         let wait = 200;
+        let response: Response;
 
-        const retry = async (): Promise<AxiosResponse<RequestData, ReponseData>> =>
+        const retry = async (): Promise<Response> =>
         {
             try {
-                return await axios(request);
+                response = await fetch(request.url, request);
+                return response;
             } catch(error) {
                 if(++retryCount > retryLimit) // We've reached our retry limit?
                     throw error;
-                else if(isAxiosError(error) && (error.response?.status === 429 || error.response?.status === 503 || error.response?.status === 504)) // We got a retryable response?
+                else if(error instanceof Error &&
+                        [429, 503, 504].includes(response?.status as number)) // We got a retryable response?
                 {
-                    const retryAfter = error.response.headers['Retry-After'];
-                    if(retryAfter && !isNaN(retryAfter)) // We got throttled
+                    const retryAfter = response?.headers.get('Retry-After'); // Access headers with .get()
+                    if(retryAfter && !isNaN(parseInt(retryAfter))) // We got throttled
                         wait = parseInt(retryAfter) * 1000;
                     else
                         wait *= 2;
@@ -160,6 +165,7 @@ export class Mailer
             const res = await this.#msalClient.acquireTokenByClientCredential({
                 scopes: ['https://graph.microsoft.com/.default'],
             });
+            log('verbose', 'Aquired token', {token: res?.accessToken});
             return res?.accessToken!;
         });
     }
